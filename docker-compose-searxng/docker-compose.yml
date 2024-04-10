@@ -1,0 +1,26 @@
+version: "3"
+
+services:
+
+  searxng:
+    hostname: searxng
+    image: docker.io/searxng/searxng:latest
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml
+    # 配置文件已禁用 limiter，如公网部署不建议开启端口。
+    # Limiter disabled; avoid exposing ports in public deployments.
+    # ports:
+    #   - "8080:8080"
+
+  search4all:
+    image: docker.io/fatwang2/search4all:latest
+    restart: unless-stopped
+    ports:
+      - 8800:8800
+    environment:
+      OPENAI_API_KEY: sk-xxxx
+      OPENAI_BASE_URL: https://api.openai.com/v1
+      LLM_MODEL: gpt-3.5-turbo-0125
+      RELATED_QUESTIONS: 1
+      BACKEND: SEARXNG
+      SEARXNG_BASE_URL: http://searxng:8080/search

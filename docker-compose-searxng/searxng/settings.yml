@@ -1,0 +1,14 @@
+# see https://docs.searxng.org/admin/settings/settings.html#settings-use-default-settings
+use_default_settings: true
+server:
+  secret_key: "SEARCH4ALL"  # change this!
+  limiter: false  # can be disabled for a private instance
+search:
+  formats:
+    - html
+    - json
+# see https://docs.searxng.org/admin/settings/settings_outgoing.html
+# outgoing:
+#   proxies:
+#     all://:
+#       - http://x.x.x.x:7890
