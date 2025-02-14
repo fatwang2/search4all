@@ -417,6 +417,7 @@ def search_with_searXNG(query: str, url: str):
 
         conv_links = []
 
+        results = []
         if search_results.get("results"):
             for item in search_results.get("results")[0:9]:
                 name = item.get("title")
@@ -442,8 +443,6 @@ def search_with_searXNG(query: str, url: str):
                         "snippet": snippet,
                     }
                 )
-            results = []
-            futures = []
 
             # executor = ThreadPoolExecutor(max_workers=10)
             # for url in pedding_urls:
