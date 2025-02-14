@@ -1,27 +1,29 @@
+import asyncio
 import concurrent.futures
 import json
 import os
 import re
-import requests
 import traceback
-import httpx
-from typing import AsyncGenerator
-from openai import AsyncOpenAI
-import asyncio
-from anthropic import AsyncAnthropic
-from loguru import logger
-from dotenv import load_dotenv
 import urllib.parse
-import trafilatura
-from trafilatura import bare_extraction
-import tldextract
 from concurrent.futures import ThreadPoolExecutor
+from typing import AsyncGenerator
 from urllib.parse import urlparse
+
+import httpx
+import requests
+import tldextract
+import trafilatura
+from anthropic import AsyncAnthropic
+from dotenv import load_dotenv
+from loguru import logger
+from openai import AsyncOpenAI
+from trafilatura import bare_extraction
+
 load_dotenv()
 
 import sanic
-from sanic import Sanic
 import sanic.exceptions
+from sanic import Sanic
 from sanic.exceptions import HTTPException, InvalidUsage
 from sqlitedict import SqliteDict
 
@@ -41,7 +43,6 @@ GOOGLE_SEARCH_ENDPOINT = "https://customsearch.googleapis.com/customsearch/v1"
 SERPER_SEARCH_ENDPOINT = "https://google.serper.dev/search"
 SEARCHAPI_SEARCH_ENDPOINT = "https://www.searchapi.io/api/v1/search"
 SEARCH1API_SEARCH_ENDPOINT = "https://api.search1api.com/search/"
-
 
 
 # Specify the number of references from the search engine you want to use.
@@ -113,9 +114,9 @@ class KVWrapper(object):
     def put(self, key: str, value: str):
         self._db[key] = value
         self._db.commit()
-    
+
     def append(self, key: str, value):
-        """ 记录聊天历史 """
+        """记录聊天历史"""
         self._db[key] = self._db.get(key, [])
         # 最长记录的对话轮数 MAX_HISTORY_LEN
         _ = self._db[key][-MAX_HISTORY_LEN:]
@@ -123,40 +124,42 @@ class KVWrapper(object):
         self._db[key] = _
         self._db.commit()
 
+
 # 格式化输出部分
 def extract_all_sections(text: str):
     # 定义正则表达式模式以匹配各部分
     sections_pattern = r"(.*?)__LLM_RESPONSE__(.*?)(__RELATED_QUESTIONS__(.*))?$"
-    
+
     # 使用正则表达式查找各部分内容
     match = re.search(sections_pattern, text, re.DOTALL)
-    
+
     # 从匹配结果中提取文本，如果没有匹配则返回None
     if match:
         search_results = match.group(1).strip()  # 前置文本作为搜索结果
-        llm_response = match.group(2).strip()    # 问题回答部分
-        related_questions = match.group(4).strip() if match.group(4) else ""  # 相关问题文本，如果不存在则返回空字符串
+        llm_response = match.group(2).strip()  # 问题回答部分
+        related_questions = (
+            match.group(4).strip() if match.group(4) else ""
+        )  # 相关问题文本，如果不存在则返回空字符串
     else:
         search_results, llm_response, related_questions = None, None, None
-    
+
     return search_results, llm_response, related_questions
+
 
 def search_with_search1api(query: str, search1api_key: str):
     """Search with bing and return the contexts."""
-    payload = {
-        "max_results": 10,
-        "query": query,
-        "search_service": "google"
-    }
+    payload = {"max_results": 10, "query": query, "search_service": "google"}
     headers = {
         "Authorization": f"Bearer {search1api_key}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
-    response = requests.request("POST", SEARCH1API_SEARCH_ENDPOINT, json=payload, headers=headers)
+    response = requests.request(
+        "POST", SEARCH1API_SEARCH_ENDPOINT, json=payload, headers=headers
+    )
     if not response.ok:
         logger.error(f"{response.status_code} {response.text}")
         raise HTTPException("Search engine error.")
-    
+
     json_content = response.json()
     try:
         contexts = json_content["results"][:REFERENCE_COUNT]
@@ -166,8 +169,10 @@ def search_with_search1api(query: str, search1api_key: str):
     except KeyError:
         logger.error(f"Error encountered: {json_content}")
         return []
-    
+
     return contexts
+
+
 def search_with_bing(query: str, subscription_key: str):
     """
     Search with bing and return the contexts.
@@ -387,20 +392,24 @@ def search_with_searchapi(query: str, subscription_key: str):
 def extract_url_content(url):
     logger.info(url)
     downloaded = trafilatura.fetch_url(url)
-    content =  trafilatura.extract(downloaded)
+    content = trafilatura.extract(downloaded)
 
-    logger.info(url +"______"+  content)
-    return {"url":url, "content":content}
+    logger.info(url + "______" + content)
+    return {"url": url, "content": content}
 
 
+def search_with_searXNG(query: str, url: str):
 
-def search_with_searXNG(query:str,url:str):
- 
     content_list = []
 
     try:
         safe_string = urllib.parse.quote_plus(":auto " + query)
-        response = requests.get(url+'?q=' + safe_string + '&category=general&format=json&engines=bing%2Cgoogle')
+        response = requests.get(
+            url
+            + "?q="
+            + safe_string
+            + "&category=general&format=json&engines=bing%2Cgoogle"
+        )
         response.raise_for_status()
         search_results = response.json()
 
@@ -408,31 +417,35 @@ def search_with_searXNG(query:str,url:str):
 
         conv_links = []
 
-        if search_results.get('results'):
-            for item in search_results.get('results')[0:9]:
-                name = item.get('title')
-                snippet = item.get('content')
-                url = item.get('url')
+        if search_results.get("results"):
+            for item in search_results.get("results")[0:9]:
+                name = item.get("title")
+                snippet = item.get("content")
+                url = item.get("url")
                 pedding_urls.append(url)
 
                 if url:
                     url_parsed = urlparse(url)
                     domain = url_parsed.netloc
-                    icon_url =  url_parsed.scheme + '://' + url_parsed.netloc + '/favicon.ico'
+                    icon_url = (
+                        url_parsed.scheme + "://" + url_parsed.netloc + "/favicon.ico"
+                    )
                     site_name = tldextract.extract(url).domain
 
-                conv_links.append({
-                    'site_name':site_name,
-                    'icon_url':icon_url,
-                    'title':name,
-                    'name':name,
-                    'url':url,
-                    'snippet':snippet
-                })
+                conv_links.append(
+                    {
+                        "site_name": site_name,
+                        "icon_url": icon_url,
+                        "title": name,
+                        "name": name,
+                        "url": url,
+                        "snippet": snippet,
+                    }
+                )
             results = []
             futures = []
 
-            # executor = ThreadPoolExecutor(max_workers=10) 
+            # executor = ThreadPoolExecutor(max_workers=10)
             # for url in pedding_urls:
             #     futures.append(executor.submit(extract_url_content,url))
             # try:
@@ -445,7 +458,7 @@ def search_with_searXNG(query:str,url:str):
             # logger.info(results)
             # for content in results:
             #     if content and content.get('content'):
-                    
+
             #         item_dict = {
             #             "url":content.get('url'),
             #             "name":content.get('url'),
@@ -456,26 +469,24 @@ def search_with_searXNG(query:str,url:str):
             #         content_list.append(item_dict)
             #     logger.info("URL: {}".format(url))
             #     logger.info("=================")
-        if len(results)== 0 :
+        if len(results) == 0:
             content_list = conv_links
-        return  content_list
+        return content_list
     except Exception as ex:
         logger.error(ex)
         raise ex
 
 
-
 def new_async_client(_app):
     if "claude-3" in _app.ctx.model.lower():
-        return AsyncAnthropic(
-            api_key=os.getenv("ANTHROPIC_API_KEY")
-        )
+        return AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
     else:
         return AsyncOpenAI(
             api_key=os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY"),
             base_url=os.getenv("OPENAI_BASE_URL"),
             http_client=_app.ctx.http_session,
         )
+
 
 @app.before_server_start
 async def server_init(_app):
@@ -526,11 +537,13 @@ async def server_init(_app):
     elif _app.ctx.backend == "SEARXNG":
         logger.info(os.getenv("SEARXNG_BASE_URL"))
         _app.ctx.search_function = lambda query: search_with_searXNG(
-            query, 
+            query,
             os.getenv("SEARXNG_BASE_URL"),
         )
     else:
-        raise RuntimeError("Backend must be BING, GOOGLE, SERPER or SEARCHAPI or SEARCH1API.")
+        raise RuntimeError(
+            "Backend must be BING, GOOGLE, SERPER or SEARCHAPI or SEARCH1API."
+        )
     _app.ctx.model = os.getenv("LLM_MODEL")
     _app.ctx.handler_max_concurrency = 16
     # An executor to carry out async tasks, such as uploading to KV.
@@ -552,6 +565,7 @@ async def server_init(_app):
         timeout=httpx.Timeout(connect=10, read=120, write=120, pool=10),
     )
 
+
 async def get_related_questions(_app, query, contexts):
     """
     Gets related questions based on the query and context.
@@ -569,9 +583,9 @@ async def get_related_questions(_app, query, contexts):
     )
 
     try:
-        logger.info('Start getting related questions')
+        logger.info("Start getting related questions")
         if "claude-3" in _app.ctx.model.lower():
-            logger.info('Using Claude-3 model')
+            logger.info("Using Claude-3 model")
             client = new_async_client(_app)
             tools = [
                 {
@@ -585,44 +599,46 @@ async def get_related_questions(_app, query, contexts):
                                 "items": {
                                     "type": "string",
                                     "description": "A related question to the original question and context.",
-                                }
+                                },
                             }
                         },
-                        "required": ["questions"]
-                    }
-                    
+                        "required": ["questions"],
+                    },
                 }
             ]
             response = await client.beta.tools.messages.create(
                 model=_app.ctx.model,
                 system=_more_questions_prompt,
                 max_tokens=1000,
-                tools=tools,  
+                tools=tools,
                 messages=[
-                {"role": "user", "content": query},
-            ]
+                    {"role": "user", "content": query},
+                ],
             )
-            logger.info('Response received from Claude-3 model')
+            logger.info("Response received from Claude-3 model")
 
             if response.content and len(response.content) > 0:
                 related = []
                 for block in response.content:
-                    if block.type == "tool_use" and block.name == "ask_related_questions":
+                    if (
+                        block.type == "tool_use"
+                        and block.name == "ask_related_questions"
+                    ):
                         related = block.input["questions"]
                         break
             else:
                 related = []
-            
+
             if related and isinstance(related, str):
                 try:
                     related = json.loads(related)
                 except json.JSONDecodeError:
                     logger.error("Failed to parse related questions as JSON")
                     return []
-            logger.info('Successfully got related questions')
-            return [{"question": question} for question in related[:5]] 
+            logger.info("Successfully got related questions")
+            return [{"question": question} for question in related[:5]]
         else:
-            logger.info('Using OpenAI model')
+            logger.info("Using OpenAI model")
             openai_client = new_async_client(_app)
             tools = [
                 {
@@ -638,75 +654,88 @@ async def get_related_questions(_app, query, contexts):
                                     "items": {
                                         "type": "string",
                                         "description": "A related question to the original question and context.",
-                                    }
+                                    },
                                 }
                             },
-                            "required": ["questions"]
-                        }
-                    }
+                            "required": ["questions"],
+                        },
+                    },
                 }
             ]
-            messages=[
-                    {"role": "system", "content": _more_questions_prompt},
-                    {"role": "user", "content": query},
-                ]
+            messages = [
+                {"role": "system", "content": _more_questions_prompt},
+                {"role": "user", "content": query},
+            ]
             request_body = {
                 "model": _app.ctx.model,
                 "messages": messages,
                 "max_tokens": 1000,
                 "tools": tools,
                 "tool_choice": {
-                "type": "function",
-                "function": {
-                    "name": "ask_related_questions"
-                }
-                },        
+                    "type": "function",
+                    "function": {"name": "ask_related_questions"},
+                },
             }
             try:
-                llm_response = await openai_client.chat.completions.create(**request_body)
-                
+                llm_response = await openai_client.chat.completions.create(
+                    **request_body
+                )
+
                 if llm_response.choices and llm_response.choices[0].message:
                     message = llm_response.choices[0].message
-                    
+
                     if message.tool_calls:
                         related = message.tool_calls[0].function.arguments
                         if isinstance(related, str):
                             related = json.loads(related)
                         logger.trace(f"Related questions: {related}")
-                        return [{"question": question} for question in related["questions"][:5]]
-                    
+                        return [
+                            {"question": question}
+                            for question in related["questions"][:5]
+                        ]
+
                     elif message.content:
                         # 如果不存在 tool_calls 字段,但存在 content 字段,从 content 中提取相关问题
                         content = message.content
-                        related_questions = content.split('\n')
-                        related_questions = [q.strip() for q in related_questions if q.strip()]
-                        
+                        related_questions = content.split("\n")
+                        related_questions = [
+                            q.strip() for q in related_questions if q.strip()
+                        ]
+
                         # 提取带有序号的问题
                         cleaned_questions = []
                         for question in related_questions:
-                            if question.startswith('1.') or question.startswith('2.') or question.startswith('3.'):
+                            if (
+                                question.startswith("1.")
+                                or question.startswith("2.")
+                                or question.startswith("3.")
+                            ):
                                 question = question[3:].strip()  # 去除问题编号和空格
-                                
+
                                 if question.startswith('"') and question.endswith('"'):
                                     question = question[1:-1]  # 去除首尾的双引号
                                 elif question.startswith('"'):
                                     question = question[1:]  # 去除开头的双引号
                                 elif question.endswith('"'):
                                     question = question[:-1]  # 去除结尾的双引号
-                                
+
                                 cleaned_questions.append(question)
-                        
+
                         logger.trace(f"Related questions: {cleaned_questions}")
-                        return [{"question": question} for question in cleaned_questions[:5]]
-                
+                        return [
+                            {"question": question} for question in cleaned_questions[:5]
+                        ]
+
             except Exception as e:
-                    logger.error(f"Error occurred while sending request to OpenAI model: {str(e)}")
-                    return []
+                logger.error(
+                    f"Error occurred while sending request to OpenAI model: {str(e)}"
+                )
+                return []
     except Exception as e:
-        logger.error(
-            f"Encountered error while generating related questions: {str(e)}"
-        )
+        logger.error(f"Encountered error while generating related questions: {str(e)}")
         return []
+
+
 async def _raw_stream_response(
     _app, contexts, llm_response, related_questions_future
 ) -> AsyncGenerator[str, None]:
@@ -725,7 +754,7 @@ async def _raw_stream_response(
             "(The search engine returned nothing for this query. Please take the"
             " answer with a grain of salt.)\n\n"
         )
-    
+
     if "claude-3" in _app.ctx.model.lower():
         # Process Claude's stream response
         async for text in llm_response:
@@ -784,11 +813,11 @@ async def query_function(request: sanic.Request):
     generate_related_questions = params.get("generate_related_questions", True)
     if not query:
         raise HTTPException("query must be provided.")
-    
+
     # 定义传递给生成答案的聊天历史 以及搜索结果
     chat_history = []
     contexts = ""
-    
+
     # Note that, if uuid exists, we don't check if the stored query is the same
     # as the current query, and simply return the stored result. This is to enable
     # the user to share a searched link to others and have others see the same result.
@@ -798,7 +827,9 @@ async def query_function(request: sanic.Request):
             history = []
             try:
                 history = await _app.loop.run_in_executor(
-                    _app.ctx.executor, lambda sid: _app.ctx.kv.get(sid), f"{search_uuid}_history"
+                    _app.ctx.executor,
+                    lambda sid: _app.ctx.kv.get(sid),
+                    f"{search_uuid}_history",
                 )
                 result = await _app.loop.run_in_executor(
                     _app.ctx.executor, lambda sid: _app.ctx.kv.get(sid), search_uuid
@@ -815,7 +846,11 @@ async def query_function(request: sanic.Request):
                 # 获取最后一次记录
                 last_entry = history[-1]
                 # 确定最后一次记录的数据完整性
-                old_query, search_results, llm_response  = last_entry.get("query", ""), last_entry.get("search_results", ""), last_entry.get("llm_response", "")
+                old_query, search_results, llm_response = (
+                    last_entry.get("query", ""),
+                    last_entry.get("search_results", ""),
+                    last_entry.get("llm_response", ""),
+                )
                 # 如果存在旧查询和搜索结果
                 if old_query and search_results:
                     if old_query != query:
@@ -825,10 +860,17 @@ async def query_function(request: sanic.Request):
                         chat_history = []
                         for entry in history:
                             if "query" in entry and "llm_response" in entry:
-                                chat_history.append({"role": "user", "content": entry["query"]})
-                                chat_history.append({"role": "assistant", "content": entry["llm_response"]})
+                                chat_history.append(
+                                    {"role": "user", "content": entry["query"]}
+                                )
+                                chat_history.append(
+                                    {
+                                        "role": "assistant",
+                                        "content": entry["llm_response"],
+                                    }
+                                )
                     else:
-                        return sanic.text(result["txt"]) # 查询未改变，直接返回结果
+                        return sanic.text(result["txt"])  # 查询未改变，直接返回结果
         else:
             try:
                 result = await _app.loop.run_in_executor(
@@ -867,7 +909,7 @@ async def query_function(request: sanic.Request):
     # Basic attack protection: remove "[INST]" or "[/INST]" from the query
     query = re.sub(r"\[/?INST\]", "", query)
     # 开启聊天历史并且有有效数据 则不再重新请求搜索
-    if not _app.ctx.should_do_chat_history or  contexts in ("", None):
+    if not _app.ctx.should_do_chat_history or contexts in ("", None):
         contexts = await _app.loop.run_in_executor(
             _app.ctx.executor, _app.ctx.search_function, query
         )
@@ -885,7 +927,7 @@ async def query_function(request: sanic.Request):
         if "claude-3" in _app.ctx.model.lower():
             logger.info("Using Claude for generating LLM response")
             client = new_async_client(_app)
-            messages=[
+            messages = [
                 {"role": "user", "content": query},
             ]
             messages = []
@@ -915,8 +957,8 @@ async def query_function(request: sanic.Request):
                 model=_app.ctx.model,
                 max_tokens=1024,
                 system=system_prompt,
-                messages=messages
-            )as stream:
+                messages=messages,
+            ) as stream:
                 async for text in stream.text_stream:
                     all_yielded_results.append(text)
                     await response.send(text)
@@ -935,14 +977,14 @@ async def query_function(request: sanic.Request):
                     all_yielded_results.append(result)
                 except Exception as e:
                     logger.error(f"Error during related questions generation: {e}")
-            
+
         else:
             logger.info("Using OpenAI for generating LLM response")
             openai_client = new_async_client(_app)
-            messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": query},
-                ]
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": query},
+            ]
 
             if chat_history and len(chat_history) % 2 == 0:
                 # 将历史插入到消息中 index = 1 的位置
@@ -962,7 +1004,7 @@ async def query_function(request: sanic.Request):
             ):
                 all_yielded_results.append(result)
                 await response.send(result)
-            logger.info("Finished streaming LLM response")            
+            logger.info("Finished streaming LLM response")
 
     except Exception as e:
         logger.error(f"encountered error: {e}\n{traceback.format_exc()}")
@@ -972,22 +1014,32 @@ async def query_function(request: sanic.Request):
     await response.eof()
     if _app.ctx.should_do_chat_history:
         # 保存聊天历史
-        _search_results, _llm_response, _related_questions = await _app.loop.run_in_executor(
-            _app.ctx.executor, extract_all_sections, "".join(all_yielded_results)
+        _search_results, _llm_response, _related_questions = (
+            await _app.loop.run_in_executor(
+                _app.ctx.executor, extract_all_sections, "".join(all_yielded_results)
+            )
         )
         if _search_results:
             _search_results = json.loads(_search_results)
         if _related_questions:
             _related_questions = json.loads(_related_questions)
         _ = _app.ctx.executor.submit(
-            _app.ctx.kv.append, f"{search_uuid}_history", {
+            _app.ctx.kv.append,
+            f"{search_uuid}_history",
+            {
                 "query": query,
                 "search_results": _search_results,
                 "llm_response": _llm_response,
-                "related_questions": _related_questions
-            })
+                "related_questions": _related_questions,
+            },
+        )
     _ = _app.ctx.executor.submit(
-        _app.ctx.kv.put, search_uuid, {"query": query, "txt": "".join(all_yielded_results)}  # 原来的缓存是直接根据sid返回结果，开启聊天历史后 同一个sid存储多轮对话，因此需要存储 query 兼容多轮对话
+        _app.ctx.kv.put,
+        search_uuid,
+        {
+            "query": query,
+            "txt": "".join(all_yielded_results),
+        },  # 原来的缓存是直接根据sid返回结果，开启聊天历史后 同一个sid存储多轮对话，因此需要存储 query 兼容多轮对话
     )
 
 
