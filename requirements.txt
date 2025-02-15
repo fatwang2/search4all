@@ -1,10 +1,9 @@
 requests
 httpx
-openai==1.14.1
+openai
 anthropic
 sanic
 sqlitedict
 python-dotenv
-tld==0.13
 tldextract==5.1.2
 trafilatura==1.8.1
