@@ -1,13 +1,15 @@
 import json
+
+import logging
 import os
 import sys
-
-from loguru import logger
 
 _current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.extend([_current_dir])
 
 from src.utils import new_async_client
+
+logger = logging.getLogger("qa")
 
 
 async def get_related_questions(_app, query, contexts):

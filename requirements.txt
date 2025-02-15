@@ -2,7 +2,6 @@ requests
 httpx
 openai==1.14.1
 anthropic
-loguru
 sanic
 sqlitedict
 python-dotenv

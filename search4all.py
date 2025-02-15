@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
@@ -9,7 +10,6 @@ from concurrent.futures import ThreadPoolExecutor
 import httpx
 import sanic
 from dotenv import load_dotenv
-from loguru import logger
 from sanic import Sanic
 from sanic.exceptions import HTTPException, InvalidUsage
 
@@ -30,6 +30,14 @@ from src.search import (
 from src.utils import _raw_stream_response, new_async_client
 
 load_dotenv()
+
+# Initialize logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger("search4all")
+
 app = Sanic("search")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

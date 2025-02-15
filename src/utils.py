@@ -1,11 +1,13 @@
 import json
+import logging
 import os
 import traceback
 from typing import AsyncGenerator
 
 from anthropic import AsyncAnthropic
-from loguru import logger
 from openai import AsyncOpenAI
+
+logger = logging.getLogger("utils")
 
 
 def new_async_client(_app):

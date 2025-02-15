@@ -1,11 +1,11 @@
 import json
+import logging
 import os
 import sys
 from urllib.parse import quote_plus, urlparse
 
 import requests
 import tldextract
-from loguru import logger
 from sanic.exceptions import HTTPException, InvalidUsage
 from trafilatura import bare_extraction, extract, fetch_url
 
@@ -13,6 +13,8 @@ _current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.extend([_current_dir])
 
 from src.constant import *
+
+logger = logging.getLogger("search")
 
 
 def extract_url_content(url):
