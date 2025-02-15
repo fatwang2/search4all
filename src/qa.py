@@ -134,7 +134,7 @@ async def get_related_questions(_app, query, contexts):
                         related = message.tool_calls[0].function.arguments
                         if isinstance(related, str):
                             related = json.loads(related)
-                        logger.trace(f"Related questions: {related}")
+                        logger.debug(f"Related questions: {related}")
                         return [
                             {"question": question}
                             for question in related["questions"][:5]
@@ -167,7 +167,7 @@ async def get_related_questions(_app, query, contexts):
 
                                 cleaned_questions.append(question)
 
-                        logger.trace(f"Related questions: {cleaned_questions}")
+                        logger.debug(f"Related questions: {cleaned_questions}")
                         return [
                             {"question": question} for question in cleaned_questions[:5]
                         ]
