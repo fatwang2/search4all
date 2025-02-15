@@ -1,128 +1,38 @@
 import asyncio
-import concurrent.futures
 import json
 import os
 import re
+import sys
 import traceback
-import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
-from typing import AsyncGenerator
-from urllib.parse import urlparse
 
 import httpx
-import requests
-import tldextract
-import trafilatura
-from anthropic import AsyncAnthropic
+import sanic
 from dotenv import load_dotenv
 from loguru import logger
-from openai import AsyncOpenAI
-from trafilatura import bare_extraction
-
-load_dotenv()
-
-import sanic
-import sanic.exceptions
 from sanic import Sanic
 from sanic.exceptions import HTTPException, InvalidUsage
-from sqlitedict import SqliteDict
 
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.extend([_current_dir])
+
+from src.cache import KVWrapper
+from src.constant import *
+from src.qa import get_related_questions
+from src.search import (
+    search_with_bing,
+    search_with_google,
+    search_with_search1api,
+    search_with_searchapi,
+    search_with_searXNG,
+    search_with_serper,
+)
+from src.utils import _raw_stream_response, new_async_client
+
+load_dotenv()
 app = Sanic("search")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
-################################################################################
-# Constant values for the RAG model.
-################################################################################
-
-# Search engine related. You don't really need to change this.
-BING_SEARCH_V7_ENDPOINT = "https://api.bing.microsoft.com/v7.0/search"
-BING_MKT = "en-US"
-GOOGLE_SEARCH_ENDPOINT = "https://customsearch.googleapis.com/customsearch/v1"
-SERPER_SEARCH_ENDPOINT = "https://google.serper.dev/search"
-SEARCHAPI_SEARCH_ENDPOINT = "https://www.searchapi.io/api/v1/search"
-SEARCH1API_SEARCH_ENDPOINT = "https://api.search1api.com/search/"
-
-
-# Specify the number of references from the search engine you want to use.
-# 8 is usually a good number.
-REFERENCE_COUNT = 8
-
-# Specify the default timeout for the search engine. If the search engine
-# does not respond within this time, we will return an error.
-DEFAULT_SEARCH_ENGINE_TIMEOUT = 5
-
-# 默认记录的对话历史长度
-MAX_HISTORY_LEN = 10
-
-
-# If the user did not provide a query, we will use this default query.
-_default_query = "Who said 'live long and prosper'?"
-
-# This is really the most important part of the rag model. It gives instructions
-# to the model on how to generate the answer. Of course, different models may
-# behave differently, and we haven't tuned the prompt to make it optimal - this
-# is left to you, application creators, as an open problem.
-_rag_query_text = """
-You are a large language AI assistant built by AI. You are given a user question, and please write clean, concise and accurate answer to the question. You will be given a set of related contexts to the question, each starting with a reference number like [[citation:x]], where x is a number. Please use the context and cite the context at the end of each sentence if applicable.
-
-Your answer must be correct, accurate and written by an expert using an unbiased and professional tone. Please limit to 1024 tokens. Do not give any information that is not related to the question, and do not repeat. Say "information is missing on" followed by the related topic, if the given context do not provide sufficient information.
-
-Please cite the contexts with the reference numbers, in the format [citation:x]. If a sentence comes from multiple contexts, please list all applicable citations, like [citation:3][citation:5]. Other than code and specific names and citations, your answer must be written in the same language as the question.
-
-Here are the set of contexts:
-
-{context}
-
-Remember, don't blindly repeat the contexts verbatim. And here is the user question:
-"""
-
-# A set of stop words to use - this is not a complete set, and you may want to
-# add more given your observation.
-stop_words = [
-    "<|im_end|>",
-    "[End]",
-    "[end]",
-    "\nReferences:\n",
-    "\nSources:\n",
-    "End.",
-]
-
-# This is the prompt that asks the model to generate related questions to the
-# original question and the contexts.
-# Ideally, one want to include both the original question and the answer from the
-# model, but we are not doing that here: if we need to wait for the answer, then
-# the generation of the related questions will usually have to start only after
-# the whole answer is generated. This creates a noticeable delay in the response
-# time. As a result, and as you will see in the code, we will be sending out two
-# consecutive requests to the model: one for the answer, and one for the related
-# questions. This is not ideal, but it is a good tradeoff between response time
-# and quality.
-
-
-class KVWrapper(object):
-    def __init__(self, kv_name):
-        self._db = SqliteDict(filename=kv_name)
-
-    def get(self, key: str):
-        v = self._db[key]
-        if v is None:
-            raise KeyError(key)
-        return v
-
-    def put(self, key: str, value: str):
-        self._db[key] = value
-        self._db.commit()
-
-    def append(self, key: str, value):
-        """记录聊天历史"""
-        self._db[key] = self._db.get(key, [])
-        # 最长记录的对话轮数 MAX_HISTORY_LEN
-        _ = self._db[key][-MAX_HISTORY_LEN:]
-        _.append(value)
-        self._db[key] = _
-        self._db.commit()
 
 
 # 格式化输出部分
@@ -144,347 +54,6 @@ def extract_all_sections(text: str):
         search_results, llm_response, related_questions = None, None, None
 
     return search_results, llm_response, related_questions
-
-
-def search_with_search1api(query: str, search1api_key: str):
-    """Search with bing and return the contexts."""
-    payload = {"max_results": 10, "query": query, "search_service": "google"}
-    headers = {
-        "Authorization": f"Bearer {search1api_key}",
-        "Content-Type": "application/json",
-    }
-    response = requests.request(
-        "POST", SEARCH1API_SEARCH_ENDPOINT, json=payload, headers=headers
-    )
-    if not response.ok:
-        logger.error(f"{response.status_code} {response.text}")
-        raise HTTPException("Search engine error.")
-
-    json_content = response.json()
-    try:
-        contexts = json_content["results"][:REFERENCE_COUNT]
-        for item in contexts:
-            item["name"] = item["title"]
-            item["url"] = item["link"]
-    except KeyError:
-        logger.error(f"Error encountered: {json_content}")
-        return []
-
-    return contexts
-
-
-def search_with_bing(query: str, subscription_key: str):
-    """
-    Search with bing and return the contexts.
-    """
-    params = {"q": query, "mkt": BING_MKT}
-    response = requests.get(
-        BING_SEARCH_V7_ENDPOINT,
-        headers={"Ocp-Apim-Subscription-Key": subscription_key},
-        params=params,
-        timeout=DEFAULT_SEARCH_ENGINE_TIMEOUT,
-    )
-    if not response.ok:
-        logger.error(f"{response.status_code} {response.text}")
-        raise HTTPException("Search engine error.")
-    json_content = response.json()
-    try:
-        contexts = json_content["webPages"]["value"][:REFERENCE_COUNT]
-    except KeyError:
-        logger.error(f"Error encountered: {json_content}")
-        return []
-    return contexts
-
-
-def search_with_google(query: str, subscription_key: str, cx: str):
-    """
-    Search with google and return the contexts.
-    """
-    params = {
-        "key": subscription_key,
-        "cx": cx,
-        "q": query,
-        "num": REFERENCE_COUNT,
-    }
-    response = requests.get(
-        GOOGLE_SEARCH_ENDPOINT, params=params, timeout=DEFAULT_SEARCH_ENGINE_TIMEOUT
-    )
-    if not response.ok:
-        logger.error(f"{response.status_code} {response.text}")
-        raise HTTPException("Search engine error.")
-    json_content = response.json()
-    try:
-        contexts = json_content["items"][:REFERENCE_COUNT]
-        for item in contexts:
-            item["name"] = item["title"]
-            item["url"] = item["link"]
-    except KeyError:
-        logger.error(f"Error encountered: {json_content}")
-        return []
-    return contexts
-
-
-def search_with_serper(query: str, subscription_key: str):
-    """
-    Search with serper and return the contexts.
-    """
-    payload = json.dumps(
-        {
-            "q": query,
-            "num": (
-                REFERENCE_COUNT
-                if REFERENCE_COUNT % 10 == 0
-                else (REFERENCE_COUNT // 10 + 1) * 10
-            ),
-        }
-    )
-    headers = {"X-API-KEY": subscription_key, "Content-Type": "application/json"}
-    logger.info(
-        f"{payload} {headers} {subscription_key} {query} {SERPER_SEARCH_ENDPOINT}"
-    )
-    response = requests.post(
-        SERPER_SEARCH_ENDPOINT,
-        headers=headers,
-        data=payload,
-        timeout=DEFAULT_SEARCH_ENGINE_TIMEOUT,
-    )
-    if not response.ok:
-        logger.error(f"{response.status_code} {response.text}")
-        raise HTTPException("Search engine error.")
-    json_content = response.json()
-    try:
-        # convert to the same format as bing/google
-        contexts = []
-        if json_content.get("knowledgeGraph"):
-            url = json_content["knowledgeGraph"].get("descriptionUrl") or json_content[
-                "knowledgeGraph"
-            ].get("website")
-            snippet = json_content["knowledgeGraph"].get("description")
-            if url and snippet:
-                contexts.append(
-                    {
-                        "name": json_content["knowledgeGraph"].get("title", ""),
-                        "url": url,
-                        "snippet": snippet,
-                    }
-                )
-        if json_content.get("answerBox"):
-            url = json_content["answerBox"].get("url")
-            snippet = json_content["answerBox"].get("snippet") or json_content[
-                "answerBox"
-            ].get("answer")
-            if url and snippet:
-                contexts.append(
-                    {
-                        "name": json_content["answerBox"].get("title", ""),
-                        "url": url,
-                        "snippet": snippet,
-                    }
-                )
-        contexts += [
-            {"name": c["title"], "url": c["link"], "snippet": c.get("snippet", "")}
-            for c in json_content["organic"]
-        ]
-        return contexts[:REFERENCE_COUNT]
-    except KeyError:
-        logger.error(f"Error encountered: {json_content}")
-        return []
-
-
-def search_with_searchapi(query: str, subscription_key: str):
-    """
-    Search with SearchApi.io and return the contexts.
-    """
-    payload = {
-        "q": query,
-        "engine": "google",
-        "num": (
-            REFERENCE_COUNT
-            if REFERENCE_COUNT % 10 == 0
-            else (REFERENCE_COUNT // 10 + 1) * 10
-        ),
-    }
-    headers = {
-        "Authorization": f"Bearer {subscription_key}",
-        "Content-Type": "application/json",
-    }
-    logger.info(
-        f"{payload} {headers} {subscription_key} {query} {SEARCHAPI_SEARCH_ENDPOINT}"
-    )
-    response = requests.get(
-        SEARCHAPI_SEARCH_ENDPOINT,
-        headers=headers,
-        params=payload,
-        timeout=30,
-    )
-    if not response.ok:
-        logger.error(f"{response.status_code} {response.text}")
-        raise HTTPException("Search engine error.")
-    json_content = response.json()
-    try:
-        # convert to the same format as bing/google
-        contexts = []
-
-        if json_content.get("answer_box"):
-            if json_content["answer_box"].get("organic_result"):
-                title = (
-                    json_content["answer_box"].get("organic_result").get("title", "")
-                )
-                url = json_content["answer_box"].get("organic_result").get("link", "")
-            if json_content["answer_box"].get("type") == "population_graph":
-                title = json_content["answer_box"].get("place", "")
-                url = json_content["answer_box"].get("explore_more_link", "")
-
-            title = json_content["answer_box"].get("title", "")
-            url = json_content["answer_box"].get("link")
-            snippet = json_content["answer_box"].get("answer") or json_content[
-                "answer_box"
-            ].get("snippet")
-
-            if url and snippet:
-                contexts.append({"name": title, "url": url, "snippet": snippet})
-
-        if json_content.get("knowledge_graph"):
-            if json_content["knowledge_graph"].get("source"):
-                url = json_content["knowledge_graph"].get("source").get("link", "")
-
-            url = json_content["knowledge_graph"].get("website", "")
-            snippet = json_content["knowledge_graph"].get("description")
-
-            if url and snippet:
-                contexts.append(
-                    {
-                        "name": json_content["knowledge_graph"].get("title", ""),
-                        "url": url,
-                        "snippet": snippet,
-                    }
-                )
-
-        contexts += [
-            {"name": c["title"], "url": c["link"], "snippet": c.get("snippet", "")}
-            for c in json_content["organic_results"]
-        ]
-
-        if json_content.get("related_questions"):
-            for question in json_content["related_questions"]:
-                if question.get("source"):
-                    url = question.get("source").get("link", "")
-                else:
-                    url = ""
-
-                snippet = question.get("answer", "")
-
-                if url and snippet:
-                    contexts.append(
-                        {
-                            "name": question.get("question", ""),
-                            "url": url,
-                            "snippet": snippet,
-                        }
-                    )
-
-        return contexts[:REFERENCE_COUNT]
-    except KeyError:
-        logger.error(f"Error encountered: {json_content}")
-        return []
-
-
-def extract_url_content(url):
-    logger.info(url)
-    downloaded = trafilatura.fetch_url(url)
-    content = trafilatura.extract(downloaded)
-
-    logger.info(url + "______" + content)
-    return {"url": url, "content": content}
-
-
-def search_with_searXNG(query: str, url: str):
-
-    content_list = []
-
-    try:
-        safe_string = urllib.parse.quote_plus(":auto " + query)
-        response = requests.get(
-            url
-            + "?q="
-            + safe_string
-            + "&category=general&format=json&engines=bing%2Cgoogle"
-        )
-        response.raise_for_status()
-        search_results = response.json()
-
-        pedding_urls = []
-
-        conv_links = []
-
-        results = []
-        if search_results.get("results"):
-            for item in search_results.get("results")[0:9]:
-                name = item.get("title")
-                snippet = item.get("content")
-                url = item.get("url")
-                pedding_urls.append(url)
-
-                if url:
-                    url_parsed = urlparse(url)
-                    domain = url_parsed.netloc
-                    icon_url = (
-                        url_parsed.scheme + "://" + url_parsed.netloc + "/favicon.ico"
-                    )
-                    site_name = tldextract.extract(url).domain
-
-                conv_links.append(
-                    {
-                        "site_name": site_name,
-                        "icon_url": icon_url,
-                        "title": name,
-                        "name": name,
-                        "url": url,
-                        "snippet": snippet,
-                    }
-                )
-
-            # executor = ThreadPoolExecutor(max_workers=10)
-            # for url in pedding_urls:
-            #     futures.append(executor.submit(extract_url_content,url))
-            # try:
-            #     for future in futures:
-            #         res = future.result(timeout=5)
-            #         results.append(res)
-            # except concurrent.futures.TimeoutError:
-            #     logger.error("任务执行超时")
-            #     executor.shutdown(wait=False,cancel_futures=True)
-            # logger.info(results)
-            # for content in results:
-            #     if content and content.get('content'):
-
-            #         item_dict = {
-            #             "url":content.get('url'),
-            #             "name":content.get('url'),
-            #             "snippet":content.get('content'),
-            #             "content": content.get('content'),
-            #             "length":len(content.get('content'))
-            #         }
-            #         content_list.append(item_dict)
-            #     logger.info("URL: {}".format(url))
-            #     logger.info("=================")
-        if len(results) == 0:
-            content_list = conv_links
-        return content_list
-    except Exception as ex:
-        logger.error(ex)
-        raise ex
-
-
-def new_async_client(_app):
-    if "claude-3" in _app.ctx.model.lower():
-        return AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-    else:
-        return AsyncOpenAI(
-            api_key=os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY"),
-            base_url=os.getenv("OPENAI_BASE_URL"),
-            http_client=_app.ctx.http_session,
-        )
 
 
 @app.before_server_start
@@ -546,7 +115,7 @@ async def server_init(_app):
     _app.ctx.model = os.getenv("LLM_MODEL")
     _app.ctx.handler_max_concurrency = 16
     # An executor to carry out async tasks, such as uploading to KV.
-    _app.ctx.executor = concurrent.futures.ThreadPoolExecutor(
+    _app.ctx.executor = ThreadPoolExecutor(
         max_workers=_app.ctx.handler_max_concurrency * 2
     )
     # Create the KV to store the search results.
@@ -563,217 +132,6 @@ async def server_init(_app):
     _app.ctx.http_session = httpx.AsyncClient(
         timeout=httpx.Timeout(connect=10, read=120, write=120, pool=10),
     )
-
-
-async def get_related_questions(_app, query, contexts):
-    """
-    Gets related questions based on the query and context.
-    """
-    _more_questions_prompt = r"""
-    You are a helpful assistant that helps the user to ask related questions, based on user's original question and the related contexts. Please identify worthwhile topics that can be follow-ups, and write questions no longer than 20 words each. Please make sure that specifics, like events, names, locations, are included in follow up questions so they can be asked standalone. For example, if the original question asks about "the Manhattan project", in the follow up question, do not just say "the project", but use the full name "the Manhattan project". Your related questions must be in the same language as the original question.
-
-    Here are the contexts of the question:
-
-    {context}
-
-    Remember, based on the original question and related contexts, suggest three such further questions. Do NOT repeat the original question. Each related question should be no longer than 20 words. Here is the original question:
-    """.format(
-        context="\n\n".join([c["snippet"] for c in contexts])
-    )
-
-    try:
-        logger.info("Start getting related questions")
-        if "claude-3" in _app.ctx.model.lower():
-            logger.info("Using Claude-3 model")
-            client = new_async_client(_app)
-            tools = [
-                {
-                    "name": "ask_related_questions",
-                    "description": "Get a list of questions related to the original question and context.",
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "questions": {
-                                "type": "array",
-                                "items": {
-                                    "type": "string",
-                                    "description": "A related question to the original question and context.",
-                                },
-                            }
-                        },
-                        "required": ["questions"],
-                    },
-                }
-            ]
-            response = await client.beta.tools.messages.create(
-                model=_app.ctx.model,
-                system=_more_questions_prompt,
-                max_tokens=1000,
-                tools=tools,
-                messages=[
-                    {"role": "user", "content": query},
-                ],
-            )
-            logger.info("Response received from Claude-3 model")
-
-            if response.content and len(response.content) > 0:
-                related = []
-                for block in response.content:
-                    if (
-                        block.type == "tool_use"
-                        and block.name == "ask_related_questions"
-                    ):
-                        related = block.input["questions"]
-                        break
-            else:
-                related = []
-
-            if related and isinstance(related, str):
-                try:
-                    related = json.loads(related)
-                except json.JSONDecodeError:
-                    logger.error("Failed to parse related questions as JSON")
-                    return []
-            logger.info("Successfully got related questions")
-            return [{"question": question} for question in related[:5]]
-        else:
-            logger.info("Using OpenAI model")
-            openai_client = new_async_client(_app)
-            tools = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "ask_related_questions",
-                        "description": "Get a list of questions related to the original question and context.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "questions": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "string",
-                                        "description": "A related question to the original question and context.",
-                                    },
-                                }
-                            },
-                            "required": ["questions"],
-                        },
-                    },
-                }
-            ]
-            messages = [
-                {"role": "system", "content": _more_questions_prompt},
-                {"role": "user", "content": query},
-            ]
-            request_body = {
-                "model": _app.ctx.model,
-                "messages": messages,
-                "max_tokens": 1000,
-                "tools": tools,
-                "tool_choice": {
-                    "type": "function",
-                    "function": {"name": "ask_related_questions"},
-                },
-            }
-            try:
-                llm_response = await openai_client.chat.completions.create(
-                    **request_body
-                )
-
-                if llm_response.choices and llm_response.choices[0].message:
-                    message = llm_response.choices[0].message
-
-                    if message.tool_calls:
-                        related = message.tool_calls[0].function.arguments
-                        if isinstance(related, str):
-                            related = json.loads(related)
-                        logger.trace(f"Related questions: {related}")
-                        return [
-                            {"question": question}
-                            for question in related["questions"][:5]
-                        ]
-
-                    elif message.content:
-                        # 如果不存在 tool_calls 字段,但存在 content 字段,从 content 中提取相关问题
-                        content = message.content
-                        related_questions = content.split("\n")
-                        related_questions = [
-                            q.strip() for q in related_questions if q.strip()
-                        ]
-
-                        # 提取带有序号的问题
-                        cleaned_questions = []
-                        for question in related_questions:
-                            if (
-                                question.startswith("1.")
-                                or question.startswith("2.")
-                                or question.startswith("3.")
-                            ):
-                                question = question[3:].strip()  # 去除问题编号和空格
-
-                                if question.startswith('"') and question.endswith('"'):
-                                    question = question[1:-1]  # 去除首尾的双引号
-                                elif question.startswith('"'):
-                                    question = question[1:]  # 去除开头的双引号
-                                elif question.endswith('"'):
-                                    question = question[:-1]  # 去除结尾的双引号
-
-                                cleaned_questions.append(question)
-
-                        logger.trace(f"Related questions: {cleaned_questions}")
-                        return [
-                            {"question": question} for question in cleaned_questions[:5]
-                        ]
-
-            except Exception as e:
-                logger.error(
-                    f"Error occurred while sending request to OpenAI model: {str(e)}"
-                )
-                return []
-    except Exception as e:
-        logger.error(f"Encountered error while generating related questions: {str(e)}")
-        return []
-
-
-async def _raw_stream_response(
-    _app, contexts, llm_response, related_questions_future
-) -> AsyncGenerator[str, None]:
-    """
-    A generator that yields the raw stream response. You do not need to call
-    this directly. Instead, use the stream_and_upload_to_kv which will also
-    upload the response to KV.
-    """
-    # First, yield the contexts.
-    yield json.dumps(contexts)
-    yield "\n\n__LLM_RESPONSE__\n\n"
-    # Second, yield the llm response.
-    if not contexts:
-        # Prepend a warning to the user
-        yield (
-            "(The search engine returned nothing for this query. Please take the"
-            " answer with a grain of salt.)\n\n"
-        )
-
-    if "claude-3" in _app.ctx.model.lower():
-        # Process Claude's stream response
-        async for text in llm_response:
-            yield text
-    else:
-        # Process OpenAI's stream response
-        async for chunk in llm_response:
-            if chunk.choices:
-                yield chunk.choices[0].delta.content or ""
-    # Third, yield the related questions. If any error happens, we will just
-    # return an empty list.
-    if related_questions_future is not None:
-        related_questions = await related_questions_future
-        try:
-            result = json.dumps(related_questions)
-        except Exception as e:
-            logger.error(f"encountered error: {e}\n{traceback.format_exc()}")
-            result = "[]"
-        yield "\n\n__RELATED_QUESTIONS__\n\n"
-        yield result
 
 
 def get_query_object(request):
@@ -904,7 +262,7 @@ async def query_function(request: sanic.Request):
     #     return StreamingResponse(content=result, media_type="text/html")
 
     # First, do a search query.
-    # query = query or _default_query
+    # query = query or default_query
     # Basic attack protection: remove "[INST]" or "[/INST]" from the query
     query = re.sub(r"\[/?INST\]", "", query)
     # 开启聊天历史并且有有效数据 则不再重新请求搜索
@@ -913,7 +271,7 @@ async def query_function(request: sanic.Request):
             _app.ctx.executor, _app.ctx.search_function, query
         )
 
-    system_prompt = _rag_query_text.format(
+    system_prompt = rag_query_text.format(
         context="\n\n".join(
             [f"[[citation:{i+1}]] {c['snippet']}" for i, c in enumerate(contexts)]
         )

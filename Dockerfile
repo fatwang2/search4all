@@ -1,5 +1,5 @@
 # Stage 1: Build Next.js frontend
-FROM node:20.11 as build-stage
+FROM node:20.11 AS build-stage
 WORKDIR /app
 
 # Install dependencies
@@ -24,6 +24,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy Next.js build artifacts from the build stage
 COPY --from=build-stage /app/NEXT_BUILD /app/ui
 
+COPY src src
 COPY search4all.py .
 
 # Set environment variables
