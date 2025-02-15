@@ -1,10 +1,10 @@
 # Stage 1: Build Next.js frontend
-FROM node:20.11 AS build-stage
+FROM node:20.11-alpine AS build-stage
 WORKDIR /app
 
 # Install dependencies
 COPY ./web/package*.json ./
-RUN npm install
+RUN npm install --production
 COPY ./web .
 
 # Compile Next.js and configure distDir
@@ -14,7 +14,7 @@ ENV NEXT_DIST_DIR ./NEXT_BUILD
 RUN npm run build
 
 # Stage 2: Set up the Python environment
-FROM python:3.10-slim
+FROM python:3.10-alpine
 WORKDIR /app
 
 # Install Python dependencies
