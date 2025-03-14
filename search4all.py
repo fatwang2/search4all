@@ -68,13 +68,13 @@ You are a large language AI assistant built by AI. You are given a user question
 
 Your answer must be correct, accurate and written by an expert using an unbiased and professional tone. Please limit to 1024 tokens. Do not give any information that is not related to the question, and do not repeat. Say "information is missing on" followed by the related topic, if the given context do not provide sufficient information.
 
-Please cite the contexts with the reference numbers, in the format [citation:x]. If a sentence comes from multiple contexts, please list all applicable citations, like [citation:3][citation:5]. Other than code and specific names and citations, your answer must be written in the same language as the question.
+Please cite the contexts with the reference numbers, in the format [citation:x]. If a sentence comes from multiple contexts, please list all applicable citations, like [citation:3][citation:5]. Other than code and specific names and citations.
 
 Here are the set of contexts:
 
 {context}
 
-Remember, don't blindly repeat the contexts verbatim. And here is the user question:
+Remember, don't blindly repeat the contexts verbatim. Your answer must be written in **{lang}**. And here is the user question:
 """
 
 # A set of stop words to use - this is not a complete set, and you may want to
@@ -552,20 +552,21 @@ async def server_init(_app):
         timeout=httpx.Timeout(connect=10, read=120, write=120, pool=10),
     )
 
-async def get_related_questions(_app, query, contexts):
+async def get_related_questions(_app, query, contexts, lang="English"):
     """
     Gets related questions based on the query and context.
     """
     _more_questions_prompt = r"""
-    You are a helpful assistant that helps the user to ask related questions, based on user's original question and the related contexts. Please identify worthwhile topics that can be follow-ups, and write questions no longer than 20 words each. Please make sure that specifics, like events, names, locations, are included in follow up questions so they can be asked standalone. For example, if the original question asks about "the Manhattan project", in the follow up question, do not just say "the project", but use the full name "the Manhattan project". Your related questions must be in the same language as the original question.
+    You are a helpful assistant that helps the user to ask related questions, based on user's original question and the related contexts. Please identify worthwhile topics that can be follow-ups, and write questions no longer than 20 words each. Please make sure that specifics, like events, names, locations, are included in follow up questions so they can be asked standalone. For example, if the original question asks about "the Manhattan project", in the follow up question, do not just say "the project", but use the full name "the Manhattan project".
 
     Here are the contexts of the question:
 
     {context}
 
-    Remember, based on the original question and related contexts, suggest three such further questions. Do NOT repeat the original question. Each related question should be no longer than 20 words. Here is the original question:
+    Remember, based on the original question and related contexts, suggest three such further questions. Do NOT repeat the original question. Each related question should be no longer than 20 words. Your answer must be written in **{lang}**. Here is the original question:
     """.format(
-        context="\n\n".join([c["snippet"] for c in contexts])
+        context="\n\n".join([c["snippet"] for c in contexts]),
+        lang=lang
     )
 
     try:
@@ -782,6 +783,13 @@ async def query_function(request: sanic.Request):
     query = params.get("query", None)
     search_uuid = params.get("search_uuid", None)
     generate_related_questions = params.get("generate_related_questions", True)
+    # 根据用户设置的语言 输出对应的语言
+    lang_dict = {
+        'en': 'English',
+        'cn': 'Chinese/简体中文/中文',
+        'jp': 'Japanese/日本語/にほんご',
+    }
+    lang = lang_dict.get(params.get("lang", "en"), "English")
     if not query:
         raise HTTPException("query must be provided.")
     
@@ -875,13 +883,14 @@ async def query_function(request: sanic.Request):
     system_prompt = _rag_query_text.format(
         context="\n\n".join(
             [f"[[citation:{i+1}]] {c['snippet']}" for i, c in enumerate(contexts)]
-        )
+        ),
+        lang=lang
     )
     try:
         if _app.ctx.should_do_related_questions and generate_related_questions:
             # While the answer is being generated, we can start generating
             # related questions as a future.
-            related_questions_future = get_related_questions(_app, query, contexts)
+            related_questions_future = get_related_questions(_app, query, contexts, lang)
         if "claude-3" in _app.ctx.model.lower():
             logger.info("Using Claude for generating LLM response")
             client = new_async_client(_app)
